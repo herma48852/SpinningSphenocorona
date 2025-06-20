@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Spinning Sphenocorona (J86) Visualizer</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+
+<style>
+  body {
+    font-family: 'Inter', sans-serif;
+    background-color: #111827; /* Dark gray background */
+    color: #e5e7eb; /* Light gray text */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    margin: 0;
+    padding: 1rem;
+    overflow: hidden; /* Prevent scrollbars from body */
+  }
+  #visualizationContainer {
+    width: 100%;
+    max-width: 64rem; /* Limit width on larger screens */
+    background-color: #1f2937; /* Slightly lighter dark gray for container */
+    padding: 1.5rem;
+    border-radius: 0.5rem; /* Rounded corners */
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); /* Subtle shadow */
+  }
+  h1 {
+    font-size: 1.875rem; /* Tailwind's text-3xl */
+    font-weight: 600; /* semibold */
+    margin-bottom: 1rem; /* Spacing below title */
+    color: #f9fafb; /* Almost white title text */
+    text-align: center;
+  }
+  #canvasContainer {
+    width: 100%;
+    height: 60vh; /* Responsive height */
+    min-height: 400px;
+    max-height: 700px;
+    border: 1px solid #374151; /* Border color */
+    border-radius: 0.375rem; /* Rounded corners for canvas */
+    margin-bottom: 1rem;
+    position: relative; /* For label renderer positioning */
+    background-color: #000000; /* Black background for the canvas itself */
+  }
+  .controls {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    gap: 0.75rem; /* Spacing between control elements */
+    margin-bottom: 0.5rem;
+  }
+  .controls button {
+    background-color: #3b82f6; /* Blue button */
+    color: white;
+    font-weight: 500; /* medium */
+    padding: 0.5rem 1rem;
+    border-radius: 0.375rem;
+    border: none;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+  .controls button:hover {
+    background-color: #2563eb; /* Darker blue on hover */
+  }
+   .controls button:disabled {
+    background-color: #6b7280; /* Gray when disabled */
+    cursor: not-allowed;
+  }
+  .controls label {
+    margin-right: 0.5rem;
+    color: #d1d5db; /* Lighter gray for labels */
+  }
+  .controls input[type="range"] {
+    width: 120px;
+    cursor: pointer;
+  }
+  .vertex-label {
+    color: #ffffff;
+    background-color: rgba(0, 0, 0, 0.75); /* Semi-transparent black background */
+    padding: 2px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: sans-serif;
+    pointer-events: none; /* Labels should not interfere with mouse controls */
+  }
+</style>
+</head>
+<body>
+
+<div id="visualizationContainer">
+  <h1>Spinning Sphenocorona (J86)</h1>
+  <div class="controls">
+    <button id="pauseButton">Pause</button>
+    <div>
+      <label for="speedSlider">Speed:</label>
+      <input type="range" id="speedSlider" min="0" max="100" value="20">
+    </div>
+    <button id="toggleShapeButton">Show Solid</button>
+    <button id="toggleLabelsButton">Hide Labels</button>
+    <button id="toggleFaceColorsButton" disabled>Color Faces</button>
+    <button id="toggleSeparationButton">Separate Square</button>
+  </div>
+  <div id="canvasContainer">
+    <!-- Three.js canvas and label renderer will be appended here -->
+    </div>
+</div>
+
+<script>
+// --- Three.js related variables ---
+let scene, camera, renderer, modelGroup;
+let movingSquareGroup, mainBodyGroup; // Groups for separated pieces
+let unifiedSolidMesh, unifiedEdgesMesh, unifiedWireframeMesh; // Meshes for the unified model
+let vertexLabels = [];
+let raycaster;
+let animationId;
+let isPaused = false;
+let isSolidView = false;
+let areLabelsVisible = true;
+let areFacesColored = false;
+let rotationSpeed = 0.005;
+
+// --- Model separation state management ---
+const SEPARATION_ANIMATION_SPEED = 0.03;
+const separationDistance = 1.0;
+let separationAxis = new THREE.Vector3();
+let squareFaceVertices = new Set();
+let isSeparated = false;
+let isSeparatingAnimating = false;
+let targetSeparationState = false;
+let separationLerpFactor = 0;
+
+// --- Custom Camera Controls ---
+let mouseDown = false; let mouseButton = 0;
+let mouseX = 0, mouseY = 0;
+let cameraDistance = 5; let cameraTheta = 0; let cameraPhi = Math.PI / 4;
+let cameraTarget = new THREE.Vector3(0, 0, 0); let cameraPanOffset = new THREE.Vector3(0, 0, 0);
+let wasPausedBeforeOrbit = false; let isOrbiting = false;
+
+// --- Data ---
+const J86_FACE_COLORS_PALETTE = [ new THREE.Color(0xff6347), new THREE.Color(0x4682b4), new THREE.Color(0x32cd32), new THREE.Color(0xffd700), new THREE.Color(0x9370db), new THREE.Color(0x40e0d0) ];
+let assignedFaceColors = [];
+let centeredVertexPositions = [];
+let J86_FACES_INDICES = []; let J86_FACE_ADJACENCIES = []; let J86_EDGES = [];
+
+// --- J86 Calculation Functions ---
+function findK() {
+    const f = (x) => 60*x**4 - 48*x**3 - 100*x**2 + 56*x + 23;
+    const df = (x) => 240*x**3 - 144*x**2 - 200*x + 56;
+    let x = 0.85273; const tolerance = 1e-15; let iterations = 0;
+    while (Math.abs(f(x)) > tolerance && iterations < 100) {
+        const fx = f(x), dfx = df(x);
+        if (Math.abs(dfx) < 1e-10) return NaN;
+        x = x - fx / dfx; iterations++;
+    }
+    return x;
+}
+
+function getVerticesJ86(k) {
+    if (isNaN(k)) return [];
+    const k2 = k * k; if (1 - k2 < 0) return [];
+    const term1_z = Math.sqrt(1 - k2);
+    const term2_num_inner = 3 - 4 * k2; if (term2_num_inner < 0) return [];
+    const term2_den = 2 * Math.sqrt(1 - k2); if (term2_den <= 0) return [];
+    const term2_y_add = Math.sqrt(term2_num_inner) / term2_den;
+    const term3_z_num = 1 - 2 * k2;
+    const term3_z_den = 2 * Math.sqrt(1 - k2); if (term3_z_den <= 0) return [];
+    const z_val_for_y = term3_z_num / term3_z_den;
+    const term4_z_inner = 0.5 + k - k2; if (term4_z_inner < 0) return [];
+    const term4_z = -Math.sqrt(term4_z_inner);
+    const y_val = 0.5 + term2_y_add;
+    const vertices = [ { id: 0, coords: [0, 0.5, term1_z] }, { id: 1, coords: [0, -0.5, term1_z] }, { id: 2, coords: [k, 0.5, 0] }, { id: 3, coords: [k, -0.5, 0] }, { id: 4, coords: [-k, 0.5, 0] }, { id: 5, coords: [-k, -0.5, 0] }, { id: 6, coords: [0, y_val, z_val_for_y] }, { id: 7, coords: [0, -y_val, z_val_for_y] }, { id: 8, coords: [0.5, 0, term4_z] }, { id: 9, coords: [-0.5, 0, term4_z] } ];
+    const centroid = vertices.reduce((acc, v) => [acc[0]+v.coords[0], acc[1]+v.coords[1], acc[2]+v.coords[2]], [0,0,0]);
+    centroid.forEach((_,i) => centroid[i] /= vertices.length);
+    vertices.forEach(v => v.coords = v.coords.map((c, i) => c - centroid[i]));
+    return vertices;
+}
+
+function calculateGeometry(vertices) {
+    const numVertices = vertices.length; const edgeList = Array.from({ length: numVertices }, () => []); J86_EDGES = [];
+    for (let i = 0; i < numVertices; i++) for (let j = i + 1; j < numVertices; j++) {
+        const p1 = vertices[i]; const p2 = vertices[j]; const dSq = (p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2;
+        if (Math.abs(dSq - 1.0) < 1e-4) { edgeList[i].push(j); edgeList[j].push(i); J86_EDGES.push([i, j]); }
+    }
+    const triangles = [], squares = [];
+    for (let i = 0; i < numVertices; i++) for (const j of edgeList[i]) { if (j <= i) continue; for (const k of edgeList[j]) { if (k <= i) continue; if (edgeList[k].includes(i)) triangles.push([i, j, k].sort((a,b)=>a-b)); for (const l of edgeList[k]) { if (l <= i || l === j) continue; if (edgeList[l].includes(i) && !edgeList[i].includes(k) && !edgeList[j].includes(l)) squares.push([i, j, k, l].sort((a,b)=>a-b)); } } }
+    const allFoundFaces = [...new Set(triangles.map(t => JSON.stringify(t)))].map(s => JSON.parse(s)).concat([...new Set(squares.map(q => JSON.stringify(q)))].map(s => JSON.parse(s)));
+    const centroid = new THREE.Vector3(0,0,0);
+    J86_FACES_INDICES = allFoundFaces.map(face => {
+        let orderedFace = [...face];
+        if (face.length > 3) { let last = face[0]; let remaining = [...face.slice(1)]; orderedFace = [last]; while(remaining.length > 0) { const next = remaining.find(v => edgeList[last].includes(v)); if(!next) break; orderedFace.push(next); last = next; remaining = remaining.filter(v => v !== next); } }
+        const p0 = new THREE.Vector3().fromArray(vertices[orderedFace[0]]); const p1 = new THREE.Vector3().fromArray(vertices[orderedFace[1]]); const p2 = new THREE.Vector3().fromArray(vertices[orderedFace[2]]);
+        const faceCenter = new THREE.Vector3(); orderedFace.forEach(vIdx => faceCenter.add(new THREE.Vector3().fromArray(vertices[vIdx]))); faceCenter.divideScalar(orderedFace.length);
+        const v1 = p1.clone().sub(p0), v2 = p2.clone().sub(p0); const normal = new THREE.Vector3().crossVectors(v1, v2);
+        if (normal.dot(faceCenter.clone().sub(centroid)) < 0) return orderedFace.reverse();
+        return orderedFace;
+    });
+    J86_FACE_ADJACENCIES = Array.from({ length: J86_FACES_INDICES.length }, () => []);
+    for (let i = 0; i < J86_FACES_INDICES.length; i++) for (let j = i + 1; j < J86_FACES_INDICES.length; j++) {
+        if (J86_FACES_INDICES[i].filter(v => J86_FACES_INDICES[j].includes(v)).length >= 2) { J86_FACE_ADJACENCIES[i].push(j); J86_FACE_ADJACENCIES[j].push(i); }
+    }
+}
+
+function computeFaceColors() {
+    assignedFaceColors = new Array(J86_FACES_INDICES.length).fill(null); let assignedColorIndices = new Array(J86_FACES_INDICES.length).fill(-1);
+    for (let i = 0; i < J86_FACES_INDICES.length; i++) {
+        let neighborColorIndices = new Set(J86_FACE_ADJACENCIES[i].map(adjIdx => assignedColorIndices[adjIdx]).filter(cIdx => cIdx !== -1));
+        for (let c = 0; c < J86_FACE_COLORS_PALETTE.length; c++) if (!neighborColorIndices.has(c)) { assignedColorIndices[i] = c; assignedFaceColors[i] = J86_FACE_COLORS_PALETTE[c]; break; }
+        if (assignedFaceColors[i] === null) assignedFaceColors[i] = J86_FACE_COLORS_PALETTE[i % J86_FACE_COLORS_PALETTE.length];
+    }
+}
+
+// --- Camera Controls ---
+function updateCameraPosition() {
+    const x = cameraDistance * Math.sin(cameraPhi) * Math.cos(cameraTheta); const y = cameraDistance * Math.cos(cameraPhi); const z = cameraDistance * Math.sin(cameraPhi) * Math.sin(cameraTheta);
+    camera.position.set(x, y, z).add(cameraTarget).add(cameraPanOffset); camera.lookAt(cameraTarget.clone().add(cameraPanOffset));
+}
+function onMouseDown(event) { mouseDown = true; mouseButton = event.button; mouseX = event.clientX; mouseY = event.clientY; event.preventDefault(); if (mouseButton === 0) { isOrbiting = true; wasPausedBeforeOrbit = isPaused; isPaused = true; } }
+function onMouseUp(event) { if (isOrbiting && mouseButton === 0) isPaused = wasPausedBeforeOrbit; isOrbiting = false; mouseDown = false; event.preventDefault(); }
+function onMouseMove(event) {
+    if (!mouseDown) return; const deltaX = event.clientX - mouseX; const deltaY = event.clientY - mouseY;
+    if (mouseButton === 0) { cameraTheta -= deltaX * 0.01; cameraPhi += deltaY * 0.01; cameraPhi = Math.max(0.1, Math.min(Math.PI - 0.1, cameraPhi)); }
+    else if (mouseButton === 2) { const panSpeed = 0.002 * cameraDistance; const right = new THREE.Vector3().crossVectors(camera.up, camera.position.clone().sub(cameraTarget).normalize()).normalize(); const up = new THREE.Vector3().crossVectors(camera.position.clone().sub(cameraTarget).normalize(), right).normalize(); cameraPanOffset.add(right.multiplyScalar(-deltaX * panSpeed)); cameraPanOffset.add(up.multiplyScalar(deltaY * panSpeed)); }
+    updateCameraPosition(); mouseX = event.clientX; mouseY = event.clientY; event.preventDefault();
+}
+function onMouseWheel(event) { cameraDistance *= event.deltaY > 0 ? 1.1 : 0.9; cameraDistance = Math.max(1, Math.min(20, cameraDistance)); updateCameraPosition(); event.preventDefault(); }
+
+// --- Main Initialization ---
+function performCalculationsAndSetupVisualization() {
+    const k_val = findK(); if (isNaN(k_val)) return;
+    const verticesObjects = getVerticesJ86(k_val); if (verticesObjects.length === 0) return;
+    centeredVertexPositions = verticesObjects.map(v => v.coords);
+    calculateGeometry(centeredVertexPositions);
+    computeFaceColors();
+    setupThreeJSVisualization();
+}
+
+// --- Helper to create mesh groups from geometry data ---
+function createMeshGroup(faces, allVertices, faceColors, edges) {
+    const solidPos = [], solidColors = [], wfPoints = [];
+    faces.forEach(faceData => {
+        const { VIds, originalIndex } = faceData;
+        for (let i = 1; i < VIds.length - 1; i++) [VIds[0], VIds[i], VIds[i+1]].forEach(v_idx => {
+            solidPos.push(...allVertices[v_idx]); solidColors.push(faceColors[originalIndex].r, faceColors[originalIndex].g, faceColors[originalIndex].b);
+        });
+    });
+    edges.forEach(edge => wfPoints.push(...allVertices[edge[0]], ...allVertices[edge[1]]));
+
+    const group = new THREE.Group();
+    const solidGeom = new THREE.BufferGeometry(); solidGeom.setAttribute('position', new THREE.Float32BufferAttribute(solidPos, 3)); solidGeom.setAttribute('color', new THREE.Float32BufferAttribute(solidColors, 3)); solidGeom.computeVertexNormals();
+    const solidMaterial = new THREE.MeshPhongMaterial({ shininess: 80, specular: 0x222222, flatShading: true, vertexColors: false, color: 0x6082b6, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1, side: THREE.DoubleSide });
+    const solidMesh = new THREE.Mesh(solidGeom, solidMaterial); solidMesh.name = 'solid';
+    const edgesMesh = new THREE.LineSegments(new THREE.EdgesGeometry(solidMesh.geometry, 1), new THREE.LineBasicMaterial({ color: 0x000000, linewidth: 1.5 })); edgesMesh.name = 'edges';
+    const wfGeom = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(wfPoints, 3));
+    const wfMesh = new THREE.LineSegments(wfGeom, new THREE.LineBasicMaterial({ color: 0x00dd00, linewidth: 2 })); wfMesh.name = 'wireframe';
+    group.add(solidMesh, edgesMesh, wfMesh);
+    return group;
+}
+
+// --- Three.js Setup (Refactored) ---
+function setupThreeJSVisualization() {
+    const canvasContainer = document.getElementById('canvasContainer');
+    while (canvasContainer.firstChild) canvasContainer.removeChild(canvasContainer.firstChild);
+    if (animationId) cancelAnimationFrame(animationId);
+
+    scene = new THREE.Scene(); raycaster = new THREE.Raycaster();
+    camera = new THREE.PerspectiveCamera(75, canvasContainer.clientWidth / canvasContainer.clientHeight, 0.1, 1000);
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(canvasContainer.clientWidth, canvasContainer.clientHeight); renderer.setPixelRatio(window.devicePixelRatio);
+    canvasContainer.appendChild(renderer.domElement);
+    renderer.domElement.addEventListener('mousedown', onMouseDown); renderer.domElement.addEventListener('mouseup', onMouseUp); renderer.domElement.addEventListener('mousemove', onMouseMove); renderer.domElement.addEventListener('wheel', onMouseWheel);
+    renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+    updateCameraPosition();
+    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 1.2); dirLight.position.set(1.5, 2, 1); scene.add(dirLight);
+    
+    modelGroup = new THREE.Group(); scene.add(modelGroup);
+
+    // Partition geometry into the moving square and the rest of the body
+    const squareFace = J86_FACES_INDICES.find(f => f.length === 4);
+    if (!squareFace) { console.error("No square face found!"); return; }
+    squareFaceVertices = new Set(squareFace);
+
+    const squareFaceData = [{VIds: squareFace, originalIndex: J86_FACES_INDICES.indexOf(squareFace) }];
+    const mainBodyFacesData = J86_FACES_INDICES.map((f, i) => ({VIds: f, originalIndex: i})).filter(f => f.VIds !== squareFace);
+
+    const squareEdges = J86_EDGES.filter(e => squareFaceVertices.has(e[0]) && squareFaceVertices.has(e[1]));
+    const mainBodyEdges = J86_EDGES.filter(e => !squareEdges.includes(e));
+
+    // Calculate separation axis (normal of the square face)
+    const p0 = new THREE.Vector3().fromArray(centeredVertexPositions[squareFace[0]]);
+    const p1 = new THREE.Vector3().fromArray(centeredVertexPositions[squareFace[1]]);
+    const p2 = new THREE.Vector3().fromArray(centeredVertexPositions[squareFace[2]]);
+    separationAxis.crossVectors(p1.clone().sub(p0), p2.clone().sub(p0)).normalize();
+
+    // Create separated pieces and add directly to the rotating modelGroup
+    movingSquareGroup = createMeshGroup(squareFaceData, centeredVertexPositions, assignedFaceColors, squareEdges);
+    mainBodyGroup = createMeshGroup(mainBodyFacesData, centeredVertexPositions, assignedFaceColors, mainBodyEdges);
+    modelGroup.add(movingSquareGroup, mainBodyGroup);
+
+    // Create the single unified model and add its meshes directly to the rotating modelGroup
+    const unifiedGroup = createMeshGroup(J86_FACES_INDICES.map((f, i) => ({VIds: f, originalIndex: i})), centeredVertexPositions, assignedFaceColors, J86_EDGES);
+    unifiedSolidMesh = unifiedGroup.getObjectByName('solid');
+    unifiedEdgesMesh = unifiedGroup.getObjectByName('edges');
+    unifiedWireframeMesh = unifiedGroup.getObjectByName('wireframe');
+    modelGroup.add(unifiedSolidMesh, unifiedEdgesMesh, unifiedWireframeMesh);
+    
+    // Create vertex labels
+    vertexLabels = [];
+    centeredVertexPositions.forEach((coords, vertexId) => {
+        const labelDiv = document.createElement('div'); labelDiv.className = 'vertex-label'; labelDiv.textContent = vertexId;
+        labelDiv.style.position = 'absolute'; labelDiv.style.zIndex = '1000'; canvasContainer.appendChild(labelDiv);
+        const posVec = new THREE.Vector3().fromArray(coords);
+        vertexLabels[vertexId] = { element: labelDiv, position: posVec.clone() };
+    });
+
+    updateShapeAndColorControls();
+    rotationSpeed = parseFloat(document.getElementById('speedSlider').value) / 2000;
+    animate();
+    window.addEventListener('resize', onWindowResize, false);
+}
+
+// --- UI Update Function ---
+function updateShapeAndColorControls() {
+    const showPieces = isSeparated || isSeparatingAnimating;
+    
+    // Toggle visibility based on state
+    unifiedSolidMesh.visible = !showPieces && isSolidView;
+    unifiedEdgesMesh.visible = !showPieces && isSolidView;
+    unifiedWireframeMesh.visible = !showPieces && !isSolidView;
+    
+    movingSquareGroup.visible = showPieces;
+    mainBodyGroup.visible = showPieces;
+
+    // Toggle solid/wireframe for the pieces when they are visible
+    if(showPieces) {
+        [movingSquareGroup, mainBodyGroup].forEach(group => {
+            group.getObjectByName('solid').visible = isSolidView;
+            group.getObjectByName('edges').visible = isSolidView;
+            group.getObjectByName('wireframe').visible = !isSolidView;
+        });
+    }
+    
+    // Update materials
+    const allSolidMaterials = [ unifiedSolidMesh.material, movingSquareGroup.getObjectByName('solid').material, mainBodyGroup.getObjectByName('solid').material ];
+    allSolidMaterials.forEach(mat => {
+        mat.vertexColors = areFacesColored;
+        let baseColor = 0x6082b6; // Main body & Unified default
+        if(!areFacesColored && mat === movingSquareGroup.getObjectByName('solid').material) {
+             baseColor = 0xff8c00; // Orange for moving square
+        }
+        mat.color.set(areFacesColored ? 0xffffff : baseColor);
+        mat.needsUpdate = true;
+    });
+
+    // Update button text
+    document.getElementById('toggleShapeButton').textContent = isSolidView ? 'Show Wireframe' : 'Show Solid';
+    document.getElementById('toggleFaceColorsButton').disabled = !isSolidView;
+    document.getElementById('toggleFaceColorsButton').textContent = areFacesColored ? 'Monochrome' : 'Color Faces';
+    document.getElementById('toggleLabelsButton').textContent = areLabelsVisible ? 'Hide Labels' : 'Show Labels';
+    const sepButton = document.getElementById('toggleSeparationButton');
+    sepButton.textContent = isSeparatingAnimating ? (targetSeparationState ? 'Separating...' : 'Joining...') : (isSeparated ? 'Join Square' : 'Separate Square');
+}
+
+// --- Window Resize & Screen Position ---
+function onWindowResize() { if (!camera || !renderer) return; const c = document.getElementById('canvasContainer'); camera.aspect = c.clientWidth / c.clientHeight; camera.updateProjectionMatrix(); renderer.setSize(c.clientWidth, c.clientHeight); }
+function toScreenPosition(position, camera, renderer) { const vector = position.clone().project(camera); return { x: (vector.x * 0.5 + 0.5) * renderer.domElement.clientWidth, y: (vector.y * -0.5 + 0.5) * renderer.domElement.clientHeight, z: vector.z }; }
+
+// --- Animation Loop ---
+function animate() {
+    animationId = requestAnimationFrame(animate);
+    if (!isPaused && modelGroup) {
+        modelGroup.rotation.y += rotationSpeed;
+        modelGroup.rotation.x += rotationSpeed * 0.5;
+    }
+
+    if (isSeparatingAnimating) {
+        separationLerpFactor += targetSeparationState ? SEPARATION_ANIMATION_SPEED : -SEPARATION_ANIMATION_SPEED;
+        separationLerpFactor = Math.max(0, Math.min(1, separationLerpFactor));
+        const currentSeparation = separationLerpFactor * separationDistance;
+        movingSquareGroup.position.copy(separationAxis).multiplyScalar(currentSeparation);
+
+        if ((targetSeparationState && separationLerpFactor === 1) || (!targetSeparationState && separationLerpFactor === 0)) {
+            isSeparatingAnimating = false; isSeparated = targetSeparationState; updateShapeAndColorControls();
+        }
+    }
+
+    modelGroup.updateMatrixWorld(true);
+    const camWorldPos = new THREE.Vector3(); camera.getWorldPosition(camWorldPos);
+
+    const occluderMeshes = [];
+    if (isSolidView) {
+        const showPieces = isSeparated || isSeparatingAnimating;
+        if (showPieces) {
+            occluderMeshes.push(movingSquareGroup.getObjectByName('solid'));
+            occluderMeshes.push(mainBodyGroup.getObjectByName('solid'));
+        } else {
+            occluderMeshes.push(unifiedSolidMesh);
+        }
+    }
+
+    vertexLabels.forEach((labelObj, vertexId) => {
+        if (!labelObj) return;
+        const isSeparatedState = isSeparated || isSeparatingAnimating;
+        
+        let finalVertexWorldPosition;
+        let hostGroup;
+
+        if (isSeparatedState && squareFaceVertices.has(vertexId)) {
+            hostGroup = movingSquareGroup;
+        } else if (isSeparatedState) {
+            hostGroup = mainBodyGroup;
+        } else {
+            hostGroup = modelGroup;
+        }
+        finalVertexWorldPosition = labelObj.position.clone().applyMatrix4(hostGroup.matrixWorld);
+
+        let showLabel = areLabelsVisible;
+        if (showLabel && isSolidView && occluderMeshes.length > 0) {
+            const dir = finalVertexWorldPosition.clone().sub(camWorldPos);
+            const distToVertex = dir.length();
+            if (distToVertex > 1e-5) {
+                raycaster.set(camWorldPos, dir.normalize());
+                const intersects = raycaster.intersectObjects(occluderMeshes, false);
+                if (intersects.length > 0 && intersects[0].distance < distToVertex - 0.05) {
+                    showLabel = false;
+                }
+            }
+        }
+
+        labelObj.element.style.display = 'none';
+        if (showLabel) {
+            const screenPos = toScreenPosition(finalVertexWorldPosition, camera, renderer);
+            if (screenPos.z < 1) {
+                labelObj.element.style.display = 'block';
+                labelObj.element.style.left = `${screenPos.x - labelObj.element.offsetWidth / 2}px`;
+                labelObj.element.style.top = `${screenPos.y - labelObj.element.offsetHeight / 2}px`;
+            }
+        }
+    });
+    renderer.render(scene, camera);
+}
+
+// --- Event Listeners ---
+document.getElementById('pauseButton').addEventListener('click', () => { if (isOrbiting) wasPausedBeforeOrbit = !isPaused; isPaused = !isPaused; document.getElementById('pauseButton').textContent = isPaused ? 'Resume' : 'Pause'; });
+document.getElementById('speedSlider').addEventListener('input', (e) => { rotationSpeed = parseFloat(e.target.value) / 2000; });
+document.getElementById('toggleShapeButton').addEventListener('click', () => { isSolidView = !isSolidView; updateShapeAndColorControls(); });
+document.getElementById('toggleLabelsButton').addEventListener('click', () => { areLabelsVisible = !areLabelsVisible; updateShapeAndColorControls(); });
+document.getElementById('toggleFaceColorsButton').addEventListener('click', () => { if(isSolidView) { areFacesColored = !areFacesColored; updateShapeAndColorControls(); } });
+document.getElementById('toggleSeparationButton').addEventListener('click', () => {
+    if (!isSeparatingAnimating) {
+        targetSeparationState = !isSeparated; isSeparatingAnimating = true;
+        separationLerpFactor = isSeparated ? 1 : 0; updateShapeAndColorControls();
+    }
+});
+
+// --- Load and Unload ---
+window.onload = performCalculationsAndSetupVisualization;
+window.addEventListener('beforeunload', () => {
+    if (animationId) cancelAnimationFrame(animationId); if (renderer) renderer.dispose();
+    if (scene) scene.traverse(o => { if(o.geometry) o.geometry.dispose(); if(o.material) (Array.isArray(o.material)?o.material:[o.material]).forEach(m => m.dispose()); });
+    const canvasContainer = document.getElementById('canvasContainer');
+    if (canvasContainer) canvasContainer.querySelectorAll('.vertex-label').forEach(label => label.remove());
+    window.removeEventListener('resize', onWindowResize);
+});
+</script>
+</body>
+</html>
