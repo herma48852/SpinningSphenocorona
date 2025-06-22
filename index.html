@@ -82,7 +82,7 @@
     width: 120px;
     cursor: pointer;
   }
-  .vertex-label {
+  .vertex-label, .dihedral-label {
     color: #ffffff;
     background-color: rgba(0, 0, 0, 0.75);
     padding: 2px 5px;
@@ -93,6 +93,10 @@
     user-select: none;
     position: absolute;
     transform-origin: center center; /* Ensures scaling is from the center */
+  }
+  .dihedral-label {
+    color: #facc15; /* Yellow for dihedral angles */
+    font-size: 12px;
   }
 </style>
 </head>
@@ -108,11 +112,13 @@
     </div>
     <button id="toggleShapeButton">Show Solid</button>
     <button id="toggleLabelsButton">Hide Labels</button>
+    <button id="toggleDihedralsButton">Show Dihedrals</button>
     <button id="toggleFaceColorsButton" disabled>Color Faces</button>
     <button id="toggleSquaresSeparationButton">Separate Squares (Indiv.)</button>
     <button id="toggleConnectedSquaresButton">Separate Connected Squares</button>
     <button id="toggleTrianglesSeparationButton">Separate Triangles</button>
     <button id="togglePyramidsSeparationButton">Separate Pyramids</button>
+    <button id="toggleAllSeparationButton">Separate All</button>
   </div>
   <div id="canvasContainer">
     </div>
@@ -123,17 +129,18 @@
 let scene, camera, renderer, modelGroup;
 let faceGroups = []; // Will hold a group for each of the 14 faces
 let vertexLabels = [];
+let dihedralLabels = [];
 let raycaster;
 let animationId;
 let isPaused = false;
 let isSolidView = true;
 let areLabelsVisible = true;
+let areDihedralsVisible = false;
 let areFacesColored = false;
 let rotationSpeed = 0.005;
 
 // --- State: Separation Modes ---
 const SEPARATION_DISTANCE = 1.0;
-const SEPARATION_ANIMATION_SPEED = 0.03;
 
 // Independent Squares Separation
 let areIndivSquaresSeparated = false;
@@ -165,6 +172,13 @@ let targetPyramidsSeparationState = false;
 let pyramidsSeparationLerpFactor = 0;
 let pyramidSeparationAxis = new THREE.Vector3();
 
+// All Faces Separation
+let areAllSeparated = false;
+let isAllSeparatingAnimating = false;
+let targetAllSeparationState = false;
+let allSeparationLerpFactor = 0;
+let faceNormals = []; // To store the normal for each face
+
 // --- Face and Vertex Definitions for Separation ---
 let squareFace1, squareFace2, triangleFace1, triangleFace2;
 let pyramid1FaceDefs, pyramid2FaceDefs;
@@ -181,6 +195,7 @@ const J86_FACE_COLORS_PALETTE = [ new THREE.Color(0xff6347), new THREE.Color(0x4
 let assignedFaceColors = [];
 let centeredVertexPositions = [];
 let J86_FACES_INDICES = []; let J86_FACE_ADJACENCIES = []; let J86_EDGES = [];
+let dihedralAngles = [];
 
 // --- J86 Calculation Functions ---
 function findK() {
@@ -240,6 +255,32 @@ function calculateGeometry(vertices) {
     }
 }
 
+function calculateDihedralAngles() {
+    dihedralAngles = J86_EDGES.map(edge => {
+        const [v1_idx, v2_idx] = edge;
+        const sharedFaces = J86_FACES_INDICES.map((face, index) => ({face, index}))
+                                             .filter(f => f.face.includes(v1_idx) && f.face.includes(v2_idx));
+
+        if (sharedFaces.length !== 2) return null; // Should not happen in a convex polyhedron
+
+        const face1_indices = sharedFaces[0].face;
+        const face2_indices = sharedFaces[1].face;
+
+        const normal1 = calculateFaceNormal(face1_indices, centeredVertexPositions);
+        const normal2 = calculateFaceNormal(face2_indices, centeredVertexPositions);
+
+        const angle = Math.acos(normal1.dot(normal2));
+        const degrees = 180 - (angle * 180 / Math.PI); // Internal angle
+
+        const p1 = new THREE.Vector3().fromArray(centeredVertexPositions[v1_idx]);
+        const p2 = new THREE.Vector3().fromArray(centeredVertexPositions[v2_idx]);
+        const midpoint = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5);
+
+        return { edge, angle: degrees, midpoint };
+    }).filter(d => d !== null);
+}
+
+
 function computeFaceColors() {
     assignedFaceColors = new Array(J86_FACES_INDICES.length).fill(null); let assignedColorIndices = new Array(J86_FACES_INDICES.length).fill(-1);
     for (let i = 0; i < J86_FACES_INDICES.length; i++) {
@@ -270,6 +311,7 @@ function performCalculationsAndSetupVisualization() {
     const verticesObjects = getVerticesJ86(k_val); if (verticesObjects.length === 0) return;
     centeredVertexPositions = verticesObjects.map(v => v.coords);
     calculateGeometry(centeredVertexPositions);
+    calculateDihedralAngles();
     computeFaceColors();
     setupThreeJSVisualization();
 }
@@ -371,6 +413,11 @@ function setupThreeJSVisualization() {
     const p6 = new THREE.Vector3().fromArray(centeredVertexPositions[6]);
     const p7 = new THREE.Vector3().fromArray(centeredVertexPositions[7]);
     pyramidSeparationAxis.subVectors(p7, p6).normalize();
+
+    // Calculate normals for all faces for the "Separate All" mode
+    faceNormals = J86_FACES_INDICES.map(faceVIds => {
+        return calculateFaceNormal(faceVIds, centeredVertexPositions);
+    });
     
     // Create vertex labels
     vertexLabels = [];
@@ -379,6 +426,18 @@ function setupThreeJSVisualization() {
         labelDiv.style.position = 'absolute'; labelDiv.style.zIndex = '1000'; canvasContainer.appendChild(labelDiv);
         const posVec = new THREE.Vector3().fromArray(coords);
         vertexLabels[vertexId] = { element: labelDiv, position: posVec.clone(), hostFaceGroup: null };
+    });
+
+    // Create dihedral labels
+    dihedralLabels = [];
+    dihedralAngles.forEach((dihedral, index) => {
+        const labelDiv = document.createElement('div');
+        labelDiv.className = 'dihedral-label';
+        labelDiv.textContent = `${dihedral.angle.toFixed(2)}°`;
+        labelDiv.style.position = 'absolute';
+        labelDiv.style.zIndex = '1000';
+        canvasContainer.appendChild(labelDiv);
+        dihedralLabels[index] = { element: labelDiv, position: dihedral.midpoint.clone() };
     });
 
     updateShapeAndColorControls();
@@ -425,6 +484,7 @@ function updateShapeAndColorControls() {
     document.getElementById('toggleFaceColorsButton').disabled = !isSolidView;
     document.getElementById('toggleFaceColorsButton').textContent = areFacesColored ? 'Monochrome' : 'Color Faces';
     document.getElementById('toggleLabelsButton').textContent = areLabelsVisible ? 'Hide Labels' : 'Show Labels';
+    document.getElementById('toggleDihedralsButton').textContent = areDihedralsVisible ? 'Hide Dihedrals' : 'Show Dihedrals';
     
     const indivSqBtn = document.getElementById('toggleSquaresSeparationButton');
     indivSqBtn.textContent = areIndivSquaresSeparatingAnimating ? (targetIndivSquaresSeparationState ? 'Separating...' : 'Joining...') : (areIndivSquaresSeparated ? 'Join Squares (Indiv.)' : 'Separate Squares (Indiv.)');
@@ -437,6 +497,9 @@ function updateShapeAndColorControls() {
 
     const pyrBtn = document.getElementById('togglePyramidsSeparationButton');
     pyrBtn.textContent = arePyramidsSeparatingAnimating ? (targetPyramidsSeparationState ? 'Separating...' : 'Joining...') : (arePyramidsSeparated ? 'Join Pyramids' : 'Separate Pyramids');
+    
+    const allBtn = document.getElementById('toggleAllSeparationButton');
+    allBtn.textContent = isAllSeparatingAnimating ? (targetAllSeparationState ? 'Separating...' : 'Joining...') : (areAllSeparated ? 'Join All' : 'Separate All');
 }
 
 // --- Window Resize & Screen Position ---
@@ -452,8 +515,15 @@ function animate() {
     }
 
     // --- Handle all animations simultaneously ---
+    let currentSeparationSpeed;
+    if (isOrbiting) {
+        currentSeparationSpeed = 0.03; 
+    } else {
+        currentSeparationSpeed = (rotationSpeed * 1.5) + 0.01;
+    }
+
     if (areIndivSquaresSeparatingAnimating) {
-        indivSquaresSeparationLerpFactor += targetIndivSquaresSeparationState ? SEPARATION_ANIMATION_SPEED : -SEPARATION_ANIMATION_SPEED;
+        indivSquaresSeparationLerpFactor += targetIndivSquaresSeparationState ? currentSeparationSpeed : -currentSeparationSpeed;
         indivSquaresSeparationLerpFactor = Math.max(0, Math.min(1, indivSquaresSeparationLerpFactor));
         if ((targetIndivSquaresSeparationState && indivSquaresSeparationLerpFactor === 1) || (!targetIndivSquaresSeparationState && indivSquaresSeparationLerpFactor === 0)) {
             areIndivSquaresSeparatingAnimating = false; areIndivSquaresSeparated = targetIndivSquaresSeparationState; updateShapeAndColorControls();
@@ -461,7 +531,7 @@ function animate() {
     }
     
     if (areTrianglesSeparatingAnimating) {
-        trianglesSeparationLerpFactor += targetTrianglesSeparationState ? SEPARATION_ANIMATION_SPEED : -SEPARATION_ANIMATION_SPEED;
+        trianglesSeparationLerpFactor += targetTrianglesSeparationState ? currentSeparationSpeed : -currentSeparationSpeed;
         trianglesSeparationLerpFactor = Math.max(0, Math.min(1, trianglesSeparationLerpFactor));
         if ((targetTrianglesSeparationState && trianglesSeparationLerpFactor === 1) || (!targetTrianglesSeparationState && trianglesSeparationLerpFactor === 0)) {
             areTrianglesSeparatingAnimating = false; areTrianglesSeparated = targetTrianglesSeparationState; updateShapeAndColorControls();
@@ -469,7 +539,7 @@ function animate() {
     }
 
     if (areConnSquaresSeparatingAnimating) {
-        connSquaresSeparationLerpFactor += targetConnSquaresSeparationState ? SEPARATION_ANIMATION_SPEED : -SEPARATION_ANIMATION_SPEED;
+        connSquaresSeparationLerpFactor += targetConnSquaresSeparationState ? currentSeparationSpeed : -currentSeparationSpeed;
         connSquaresSeparationLerpFactor = Math.max(0, Math.min(1, connSquaresSeparationLerpFactor));
         if ((targetConnSquaresSeparationState && connSquaresSeparationLerpFactor === 1) || (!targetConnSquaresSeparationState && connSquaresSeparationLerpFactor === 0)) {
             areConnSquaresSeparatingAnimating = false; areConnSquaresSeparated = targetConnSquaresSeparationState; updateShapeAndColorControls();
@@ -477,10 +547,20 @@ function animate() {
     }
 
     if (arePyramidsSeparatingAnimating) {
-        pyramidsSeparationLerpFactor += targetPyramidsSeparationState ? SEPARATION_ANIMATION_SPEED : -SEPARATION_ANIMATION_SPEED;
+        pyramidsSeparationLerpFactor += targetPyramidsSeparationState ? currentSeparationSpeed : -currentSeparationSpeed;
         pyramidsSeparationLerpFactor = Math.max(0, Math.min(1, pyramidsSeparationLerpFactor));
         if ((targetPyramidsSeparationState && pyramidsSeparationLerpFactor === 1) || (!targetPyramidsSeparationState && pyramidsSeparationLerpFactor === 0)) {
             arePyramidsSeparatingAnimating = false; arePyramidsSeparated = targetPyramidsSeparationState; updateShapeAndColorControls();
+        }
+    }
+    
+    if (isAllSeparatingAnimating) {
+        allSeparationLerpFactor += targetAllSeparationState ? currentSeparationSpeed : -currentSeparationSpeed;
+        allSeparationLerpFactor = Math.max(0, Math.min(1, allSeparationLerpFactor));
+        if ((targetAllSeparationState && allSeparationLerpFactor === 1) || (!targetAllSeparationState && allSeparationLerpFactor === 0)) {
+            isAllSeparatingAnimating = false;
+            areAllSeparated = targetAllSeparationState;
+            updateShapeAndColorControls();
         }
     }
 
@@ -489,8 +569,9 @@ function animate() {
     const c_con_sq = connSquaresSeparationLerpFactor * SEPARATION_DISTANCE;
     const c_tri = trianglesSeparationLerpFactor * SEPARATION_DISTANCE;
     const c_pyr = pyramidsSeparationLerpFactor * SEPARATION_DISTANCE;
+    const c_all = allSeparationLerpFactor * SEPARATION_DISTANCE;
 
-    faceGroups.forEach(group => {
+    faceGroups.forEach((group, index) => {
         const VIds = group.userData.VIds;
         group.position.set(0,0,0); // Reset position each frame
 
@@ -510,6 +591,12 @@ function animate() {
         // Pyramids
         if (pyramid1FaceDefs.some(def => compareFaces(VIds, def))) group.position.add(pyramidSeparationAxis.clone().multiplyScalar(c_pyr));
         if (pyramid2FaceDefs.some(def => compareFaces(VIds, def))) group.position.add(pyramidSeparationAxis.clone().multiplyScalar(-c_pyr));
+
+        // All face separation
+        const normal = faceNormals[index];
+        if (normal) {
+            group.position.add(normal.clone().multiplyScalar(c_all));
+        }
     });
 
     modelGroup.updateMatrixWorld(true);
@@ -520,7 +607,7 @@ function animate() {
         // Find the best host face for the label on every frame
         let bestHost = faceGroups.find(g => {
             const VIds = g.userData.VIds;
-             // Prioritize faces that are part of an active, moving group
+            if ((areAllSeparated || isAllSeparatingAnimating)) return g.userData.VIds.includes(vertexId);
             if ((arePyramidsSeparated || arePyramidsSeparatingAnimating) && (pyramid1FaceDefs.some(def => compareFaces(VIds, def)) || pyramid2FaceDefs.some(def => compareFaces(VIds, def)))) return g.userData.VIds.includes(vertexId);
             if ((areConnSquaresSeparated || areConnSquaresSeparatingAnimating) && (compareFaces(VIds, squareFace1) || compareFaces(VIds, squareFace2))) return g.userData.VIds.includes(vertexId);
             if ((areIndivSquaresSeparated || areIndivSquaresSeparatingAnimating) && (compareFaces(VIds, squareFace1) || compareFaces(VIds, squareFace2))) return g.userData.VIds.includes(vertexId);
@@ -528,7 +615,6 @@ function animate() {
             return false;
         });
 
-        // If no separating host is found, just grab the first one it belongs to
         if (!bestHost) {
             bestHost = faceGroups.find(g => g.userData.VIds.includes(vertexId));
         }
@@ -538,12 +624,9 @@ function animate() {
             const finalVertexWorldPosition = labelObj.position.clone().applyMatrix4(labelObj.hostFaceGroup.matrixWorld);
             const distToVertex = finalVertexWorldPosition.distanceTo(camWorldPos);
             
-            // Define scaling parameters
-            const referenceDistance = 5; // A distance at which the label has scale 1
-            const minScale = 0.4; // Don't let labels get too small
-            const maxScale = 1.2; // Don't let labels get too big
-
-            // Calculate scale based on distance
+            const referenceDistance = 5; 
+            const minScale = 0.4;
+            const maxScale = 1.2; 
             let scale = referenceDistance / distToVertex;
             scale = Math.max(minScale, Math.min(maxScale, scale));
             
@@ -571,6 +654,58 @@ function animate() {
             }
         }
     });
+    
+    // --- Update Dihedral Labels ---
+    dihedralLabels.forEach((labelObj, index) => {
+        const dihedral = dihedralAngles[index];
+        const [v1_idx, v2_idx] = dihedral.edge;
+
+        // Determine which face groups this edge belongs to
+        const hostGroups = faceGroups.filter(g => g.userData.VIds.includes(v1_idx) && g.userData.VIds.includes(v2_idx));
+        
+        let finalMidpoint;
+        if (hostGroups.length > 0) {
+            // Average the transformed midpoint from each host group
+            finalMidpoint = new THREE.Vector3();
+            hostGroups.forEach(host => {
+                finalMidpoint.add(labelObj.position.clone().applyMatrix4(host.matrixWorld));
+            });
+            finalMidpoint.divideScalar(hostGroups.length);
+        } else {
+            // Fallback for wireframe or other cases
+            finalMidpoint = labelObj.position.clone().applyMatrix4(modelGroup.matrixWorld);
+        }
+        
+        const distToMidpoint = finalMidpoint.distanceTo(camWorldPos);
+        const referenceDistance = 5;
+        const scale = Math.max(0.4, Math.min(1.2, referenceDistance / distToMidpoint));
+
+        let showLabel = areDihedralsVisible;
+        if (showLabel && isSolidView) {
+             if (distToMidpoint > 1e-5) {
+                raycaster.set(camWorldPos, finalMidpoint.clone().sub(camWorldPos).normalize());
+                const occluderMeshes = faceGroups.map(g => g.getObjectByName('solid')).filter(m => m);
+                const intersects = raycaster.intersectObjects(occluderMeshes, false);
+                if (intersects.length > 0 && intersects[0].distance < distToMidpoint - 0.1) {
+                    showLabel = false;
+                }
+            }
+        }
+
+        labelObj.element.style.display = 'none';
+        if (showLabel) {
+            // Offset label "underneath" the edge from the camera's perspective
+            const screenPos = toScreenPosition(finalMidpoint, camera, renderer);
+            if (screenPos.z < 1) {
+                 labelObj.element.style.display = 'block';
+                 labelObj.element.style.left = `${screenPos.x}px`;
+                 labelObj.element.style.top = `${screenPos.y + 15 * scale}px`; // Offset down
+                 labelObj.element.style.transform = `translate(-50%, -50%) scale(${scale})`;
+            }
+        }
+    });
+
+
     renderer.render(scene, camera);
 }
 
@@ -579,6 +714,7 @@ document.getElementById('pauseButton').addEventListener('click', () => { if (isO
 document.getElementById('speedSlider').addEventListener('input', (e) => { rotationSpeed = parseFloat(e.target.value) / 2000; });
 document.getElementById('toggleShapeButton').addEventListener('click', () => { isSolidView = !isSolidView; updateShapeAndColorControls(); });
 document.getElementById('toggleLabelsButton').addEventListener('click', () => { areLabelsVisible = !areLabelsVisible; updateShapeAndColorControls(); });
+document.getElementById('toggleDihedralsButton').addEventListener('click', () => { areDihedralsVisible = !areDihedralsVisible; updateShapeAndColorControls(); });
 document.getElementById('toggleFaceColorsButton').addEventListener('click', () => { if(isSolidView) { areFacesColored = !areFacesColored; updateShapeAndColorControls(); } });
 document.getElementById('toggleSquaresSeparationButton').addEventListener('click', () => {
     if (!areIndivSquaresSeparatingAnimating) {
@@ -608,6 +744,13 @@ document.getElementById('togglePyramidsSeparationButton').addEventListener('clic
         updateShapeAndColorControls();
     }
 });
+document.getElementById('toggleAllSeparationButton').addEventListener('click', () => {
+    if (!isAllSeparatingAnimating) {
+        targetAllSeparationState = !areAllSeparated;
+        isAllSeparatingAnimating = true;
+        updateShapeAndColorControls();
+    }
+});
 
 
 // --- Load and Unload ---
@@ -616,7 +759,10 @@ window.addEventListener('beforeunload', () => {
     if (animationId) cancelAnimationFrame(animationId); if (renderer) renderer.dispose();
     if (scene) scene.traverse(o => { if(o.geometry) o.geometry.dispose(); if(o.material) (Array.isArray(o.material)?o.material:[o.material]).forEach(m => m.dispose()); });
     const canvasContainer = document.getElementById('canvasContainer');
-    if (canvasContainer) canvasContainer.querySelectorAll('.vertex-label').forEach(label => label.remove());
+    if (canvasContainer) {
+        canvasContainer.querySelectorAll('.vertex-label').forEach(label => label.remove());
+        canvasContainer.querySelectorAll('.dihedral-label').forEach(label => label.remove());
+    }
     window.removeEventListener('resize', onWindowResize);
 });
 </script>
