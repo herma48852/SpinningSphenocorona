@@ -84,13 +84,15 @@
   }
   .vertex-label {
     color: #ffffff;
-    background-color: rgba(0, 0, 0, 0.75); /* Semi-transparent black background */
+    background-color: rgba(0, 0, 0, 0.75);
     padding: 2px 5px;
     border-radius: 3px;
-    font-size: 12px;
+    font-size: 14px; /* A base font-size for scaling */
     font-family: sans-serif;
-    pointer-events: none; /* Labels should not interfere with mouse controls */
+    pointer-events: none;
     user-select: none;
+    position: absolute;
+    transform-origin: center center; /* Ensures scaling is from the center */
   }
 </style>
 </head>
@@ -534,12 +536,21 @@ function animate() {
 
         if (labelObj.hostFaceGroup) {
             const finalVertexWorldPosition = labelObj.position.clone().applyMatrix4(labelObj.hostFaceGroup.matrixWorld);
+            const distToVertex = finalVertexWorldPosition.distanceTo(camWorldPos);
+            
+            // Define scaling parameters
+            const referenceDistance = 5; // A distance at which the label has scale 1
+            const minScale = 0.4; // Don't let labels get too small
+            const maxScale = 1.2; // Don't let labels get too big
+
+            // Calculate scale based on distance
+            let scale = referenceDistance / distToVertex;
+            scale = Math.max(minScale, Math.min(maxScale, scale));
+            
             let showLabel = areLabelsVisible;
             if (showLabel && isSolidView) {
-                const dir = finalVertexWorldPosition.clone().sub(camWorldPos);
-                const distToVertex = dir.length();
                 if (distToVertex > 1e-5) {
-                    raycaster.set(camWorldPos, dir.normalize());
+                    raycaster.set(camWorldPos, finalVertexWorldPosition.clone().sub(camWorldPos).normalize());
                     const occluderMeshes = faceGroups.map(g => g.getObjectByName('solid')).filter(m => m);
                     const intersects = raycaster.intersectObjects(occluderMeshes, false);
                     if (intersects.length > 0 && intersects[0].distance < distToVertex - 0.05) {
@@ -553,8 +564,9 @@ function animate() {
                 const screenPos = toScreenPosition(finalVertexWorldPosition, camera, renderer);
                 if (screenPos.z < 1) {
                     labelObj.element.style.display = 'block';
-                    labelObj.element.style.left = `${screenPos.x - labelObj.element.offsetWidth / 2}px`;
-                    labelObj.element.style.top = `${screenPos.y - labelObj.element.offsetHeight / 2}px`;
+                    labelObj.element.style.left = `${screenPos.x}px`;
+                    labelObj.element.style.top = `${screenPos.y}px`;
+                    labelObj.element.style.transform = `translate(-50%, -50%) scale(${scale})`;
                 }
             }
         }
